@@ -12,14 +12,18 @@ Two tables, both narrow and write-rare:
   endpoint. A row is created when the request hits, a BackgroundTask updates it
   to ``running``/``completed``/``failed``. The ``GET /ingestion/jobs/{id}``
   endpoint reads from here.
+
+* ``ingestion_documents`` — normalized ``Document`` payloads produced by a
+  completed run. ``GET /ingestion/jobs/{id}/documents`` reads from here.
 """
 from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
-from sqlalchemy import Index, Integer, String, UniqueConstraint, func
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy import ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.types import DateTime
 
@@ -62,4 +66,27 @@ class IngestionJobRow(Base):
     )
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+
+
+class IngestionDocumentRow(Base):
+    __tablename__ = "ingestion_documents"
+    __table_args__ = (
+        UniqueConstraint(
+            "job_id", "document_id", name="uq_ingestion_documents_job_doc"
+        ),
+        Index("idx_ingestion_documents_job_id", "job_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("ingestion_jobs.job_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    document_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -26,10 +26,13 @@ POST /api/v1/ingestion/runs
   └→ crear job en Postgres (pending)
   └→ BackgroundTask: ingest_source()
        └→ FileSystemLoader → ParserRegistry → list[Document]
+       └→ guardar documentos en Postgres (`ingestion_documents`)
        └→ actualizar job (completed / failed)
 ```
 
-Los documentos parseados **no se persisten** todavía; solo se cuenta cuántos se produjeron. Chunking, embeddings e índice vectorial son el módulo 3.
+Los documentos parseados se persisten por job y se consultan con
+`GET /api/v1/ingestion/jobs/{job_id}/documents`. Chunking, embeddings e índice
+vectorial son el módulo 3.
 
 ## Estructura del proyecto
 
@@ -38,7 +41,7 @@ app/
 ├── main.py              # FastAPI + structlog + /health
 ├── config.py            # Settings (env vars)
 ├── dependencies.py      # Factories de catálogo, loader, registry
-├── routers/ingestion.py # POST /runs, GET /jobs/{id}
+├── routers/ingestion.py # POST /runs, GET /jobs/{id}, GET /jobs/{id}/documents
 ├── schemas/ingestion.py # Contratos Pydantic HTTP
 ├── ingestion/           # Catálogo, loaders, parsers, cleaning, PII
 └── persistence/         # SQLAlchemy + repos de jobs/mappings
@@ -77,6 +80,9 @@ curl -X POST http://localhost:8000/api/v1/ingestion/runs \
 
 # Consultar estado (sustituir JOB_ID)
 curl http://localhost:8000/api/v1/ingestion/jobs/JOB_ID
+
+# Ver documentos normalizados (solo si status=completed)
+curl http://localhost:8000/api/v1/ingestion/jobs/JOB_ID/documents
 ```
 
 Con [httpie](https://httpie.io/):
@@ -84,6 +90,7 @@ Con [httpie](https://httpie.io/):
 ```bash
 http POST :8000/api/v1/ingestion/runs source_name=presupuestos_json
 http :8000/api/v1/ingestion/jobs/JOB_ID
+http :8000/api/v1/ingestion/jobs/JOB_ID/documents
 ```
 
 Swagger UI disponible en `http://localhost:8000/docs`.
@@ -96,6 +103,7 @@ Swagger UI disponible en `http://localhost:8000/docs`.
 | `GET`  | `/health`                         | Healthcheck del servicio                                |
 | `POST` | `/api/v1/ingestion/runs`          | Lanza ingestión async de una fuente `include` → **202** |
 | `GET`  | `/api/v1/ingestion/jobs/{job_id}` | Consulta estado del job                                 |
+| `GET`  | `/api/v1/ingestion/jobs/{job_id}/documents` | Lista `Document` persistidos (job `completed`) → **200**; si no terminó → **409** |
 
 
 Errores del endpoint de runs:
@@ -146,7 +154,7 @@ docker compose exec rag bash -c 'pip install pytest pytest-asyncio httpx -q && p
 - Chunking de `Document.text`
 - Embeddings de chunks
 - Activar extensión `pgvector` e índice vectorial
-- Persistencia de documentos/chunks
+- Persistencia de chunks (documentos ya por job en `ingestion_documents`)
 - Endpoint de retrieval / búsqueda semántica
 - Cablear cleaning y PII al orchestrator HTTP
 

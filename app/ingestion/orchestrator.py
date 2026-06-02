@@ -29,6 +29,7 @@ from app.ingestion.documents.models import Document
 from app.ingestion.loaders.filesystem import FileSystemLoader
 from app.ingestion.parsers.protocol import ParseContext
 from app.ingestion.parsers.registry import ParserRegistry
+from app.persistence.repositories.documents import DocumentsRepository
 from app.persistence.repositories.jobs import JobsRepository
 
 log = structlog.get_logger(__name__)
@@ -46,6 +47,7 @@ def ingest_source(
     registry: ParserRegistry,
     jobs_repo: JobsRepository,
     job_id: uuid.UUID,
+    documents_repo: DocumentsRepository | None = None,
 ) -> list[Document]:
     """Run the ingestion for a single included source.
 
@@ -84,6 +86,8 @@ def ingest_source(
         jobs_repo.mark_failed(job_id, error_message=str(exc))
         raise
 
+    if documents_repo is not None:
+        documents_repo.save_for_job(job_id, documents)
     jobs_repo.mark_completed(job_id, documents_count=len(documents))
     bound.info("ingestion.completed", documents_count=len(documents))
     return documents

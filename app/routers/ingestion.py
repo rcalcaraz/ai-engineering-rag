@@ -1,4 +1,4 @@
-"""POST /api/v1/ingestion/runs   +   GET /api/v1/ingestion/jobs/{job_id}.
+"""Ingestion HTTP surface: runs, job status, persisted documents.
 
 The router is intentionally thin: it validates the source against the catalog,
 records the job row, dispatches the orchestrator as a BackgroundTask, and
@@ -23,8 +23,12 @@ from app.ingestion.loaders.filesystem import FileSystemLoader
 from app.ingestion.orchestrator import IngestionRejected, ingest_source
 from app.ingestion.parsers.registry import ParserRegistry
 from app.persistence.database import SessionLocal, get_session
+from app.persistence.repositories.documents import DocumentsRepository
 from app.persistence.repositories.jobs import JobsRepository
 from app.schemas.ingestion import (
+    IngestionDocumentView,
+    IngestionJobDocumentsResponse,
+    IngestionJobNotReadyDetail,
     IngestionJobView,
     IngestionRunRequest,
     IngestionRunResponse,
@@ -46,14 +50,16 @@ def _run_in_background(
     """BackgroundTask body. Owns its own Session — request session is closed."""
     session = SessionLocal()
     try:
-        repo = JobsRepository(session)
+        jobs_repo = JobsRepository(session)
+        documents_repo = DocumentsRepository(session)
         ingest_source(
             catalog=catalog,
             source_name=source_name,
             loader=loader,
             registry=registry,
-            jobs_repo=repo,
+            jobs_repo=jobs_repo,
             job_id=job_id,
+            documents_repo=documents_repo,
         )
     except Exception as exc:  # noqa: BLE001
         # The orchestrator already wrote the failure row; we just log loudly.
@@ -129,6 +135,52 @@ def get_ingestion_job(
         error_message=job.error_message,
         started_at=job.started_at,
         finished_at=job.finished_at,
+    )
+
+
+@router.get(
+    "/jobs/{job_id}/documents",
+    response_model=IngestionJobDocumentsResponse,
+    responses={
+        409: {
+            "description": "Job not completed yet or failed",
+            "model": IngestionJobNotReadyDetail,
+        },
+    },
+)
+def get_ingestion_job_documents(
+    job_id: uuid.UUID,
+    session: Session = Depends(get_session),
+) -> IngestionJobDocumentsResponse:
+    jobs_repo = JobsRepository(session)
+    job = jobs_repo.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    if job.status != "completed":
+        detail = IngestionJobNotReadyDetail(
+            job_id=job.job_id,
+            status=job.status,
+            error_message=job.error_message,
+            detail=(
+                "Documents are available only after a successful run "
+                f"(current status: {job.status!r})."
+            ),
+        )
+        raise HTTPException(status_code=409, detail=detail.model_dump(mode="json"))
+
+    documents = DocumentsRepository(session).list_by_job_id(job_id)
+    return IngestionJobDocumentsResponse(
+        job_id=job.job_id,
+        source_name=job.source_name,
+        status="completed",
+        documents=[
+            IngestionDocumentView(
+                id=doc.id,
+                text=doc.text,
+                metadata=doc.metadata,
+            )
+            for doc in documents
+        ],
     )
 
 

@@ -20,6 +20,7 @@ from app.dependencies import (
     get_parser_registry,
 )
 from app.ingestion.catalog.loader import load_catalog
+from app.ingestion.documents.models import Document
 from app.ingestion.loaders.filesystem import FileSystemLoader
 from app.ingestion.parsers.registry import default_registry
 from app.main import app
@@ -71,6 +72,19 @@ class _InMemoryJobsRepo:
             job.finished_at = datetime.now(timezone.utc)
 
 
+class _InMemoryDocumentsRepo:
+    _store: dict[uuid.UUID, list[Document]] = {}
+
+    def __init__(self, session=None) -> None:
+        pass
+
+    def save_for_job(self, job_id, documents: list[Document]) -> None:
+        self._store[job_id] = list(documents)
+
+    def list_by_job_id(self, job_id):
+        return list(self._store.get(job_id, []))
+
+
 def _write_minimal_catalog(tmp_path):
     yaml = """
     version: "1.0.0"
@@ -120,6 +134,9 @@ def ingestion_client(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "app.routers.ingestion.JobsRepository", _InMemoryJobsRepo
     )
+    monkeypatch.setattr(
+        "app.routers.ingestion.DocumentsRepository", _InMemoryDocumentsRepo
+    )
 
     # The BackgroundTask body opens its own SessionLocal; short-circuit it.
     class _NullSession:
@@ -131,6 +148,7 @@ def ingestion_client(tmp_path, monkeypatch):
 
     # Reset module-global state between tests.
     _InMemoryJobsRepo._store.clear()
+    _InMemoryDocumentsRepo._store.clear()
 
     yield TestClient(app)
 
@@ -182,3 +200,35 @@ def test_excluded_source_returns_400(ingestion_client):
 def test_get_unknown_job_returns_404(ingestion_client):
     fake = "00000000-0000-0000-0000-000000000000"
     assert ingestion_client.get(f"/api/v1/ingestion/jobs/{fake}").status_code == 404
+
+
+def test_get_job_documents_after_completed_run(ingestion_client):
+    post = ingestion_client.post(
+        "/api/v1/ingestion/runs", json={"source_name": "tiny_json"}
+    )
+    job_id = post.json()["job_id"]
+    response = ingestion_client.get(f"/api/v1/ingestion/jobs/{job_id}/documents")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "completed"
+    assert len(body["documents"]) >= 1
+    doc = body["documents"][0]
+    assert doc["text"].startswith("# Presupuesto BUDGET-2024-0001")
+    assert doc["metadata"]["source_name"] == "tiny_json"
+
+
+def test_get_job_documents_before_completion_returns_409(ingestion_client, monkeypatch):
+    class _StuckJobsRepo(_InMemoryJobsRepo):
+        def mark_completed(self, job_id, *, documents_count):
+            if job := self._store.get(job_id):
+                job.status = "running"
+
+    monkeypatch.setattr("app.routers.ingestion.JobsRepository", _StuckJobsRepo)
+    post = ingestion_client.post(
+        "/api/v1/ingestion/runs", json={"source_name": "tiny_json"}
+    )
+    job_id = post.json()["job_id"]
+    response = ingestion_client.get(f"/api/v1/ingestion/jobs/{job_id}/documents")
+    assert response.status_code == 409
+    assert response.json()["detail"]["reason"] == "job_not_ready"
+    assert response.json()["detail"]["status"] == "running"
