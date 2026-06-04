@@ -45,6 +45,7 @@ app/
 ├── schemas/ingestion.py # Contratos Pydantic HTTP
 ├── ingestion/           # Catálogo, loaders, parsers, cleaning, PII
 └── persistence/         # SQLAlchemy + repos de jobs/mappings
+scripts/                 # Demos de cleaning y PII (Session 6, sin HTTP)
 data/
 ├── catalog/catalog.yaml # Catálogo versionado de fuentes
 └── seed/                # Datos de prueba (budgets JSON, transcripts TXT)
@@ -127,6 +128,51 @@ Errores del endpoint de runs:
 
 
 Dentro de Docker Compose, `DATABASE_URL` se sobreescribe a `rag-postgres:5432`.
+
+## Scripts de demo (Session 6)
+
+Los módulos `cleaning` y `pii` **aún no están cableados** al orchestrator HTTP
+(ver [Próximos pasos](#próximos-pasos-módulo-3)). Estos scripts permiten
+probarlos de forma aislada sobre el corpus de seed, igual que en la sesión en
+vivo.
+
+### `scripts/demo_cleaning_s06.py`
+
+Carga todos los JSON de `data/seed/budgets/`, aplica limpieza tabular
+(`clean_budget_records`) y validación con Pandera (`validate_with_policy`), e
+imprime el informe de partición (válidas / cuarentena / descartadas).
+
+Resultado esperado:
+
+- 6 ficheros entran; el dedup colapsa `BUDGET-2024-0005` → 5 filas.
+- La fila con `total_amount: -50000` se descarta; el resto pasa o va a cuarentena.
+
+```bash
+# En el host (requiere uv sync previo)
+uv run python scripts/demo_cleaning_s06.py
+
+# Dentro del contenedor (con docker compose up)
+docker compose exec rag python scripts/demo_cleaning_s06.py
+```
+
+### `scripts/demo_pii_s06.py`
+
+Pseudonimiza la transcripción `transcripcion_2025-02-03_betanorte.txt` con
+Presidio + spaCy en español (`es_core_news_md`) y los recognizers custom
+(`BUDGET_ID`, `CLIENT_CODE`). Usa `InMemoryMappingStore` (sin Postgres) para
+mostrar consistencia: mismo valor original → mismo pseudónimo.
+
+Requiere el modelo spaCy español (instalado en la imagen Docker o vía
+`python -m spacy download es_core_news_md` en local).
+
+```bash
+uv run python scripts/demo_pii_s06.py
+
+docker compose exec rag python scripts/demo_pii_s06.py
+```
+
+Si `PSEUDONYM_HASH_SALT` no está definido, el script usa un salt de demo
+(`demo-salt`). En producción, configúralo en `.env`.
 
 ## Desarrollo local (sin Docker)
 

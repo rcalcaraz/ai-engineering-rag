@@ -27,6 +27,7 @@ WORKDIR /app
 
 COPY --from=builder /app/.venv /app/.venv
 COPY app/ /app/app/
+COPY scripts/ /app/scripts/
 COPY data/ /app/data/
 COPY alembic/ /app/alembic/
 COPY alembic.ini /app/alembic.ini
