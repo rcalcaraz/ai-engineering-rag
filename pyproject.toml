@@ -17,11 +17,15 @@ dependencies = [
     "openpyxl>=3.1",
     "sqlalchemy>=2.0",
     "psycopg[binary]>=3.1",
+    "asyncpg>=0.29",
+    "pgvector>=0.3",
     "alembic>=1.13",
     "presidio-analyzer>=2.2",
     "presidio-anonymizer>=2.2",
     "spacy>=3.7",
     "faker>=24.0",
+    "openai>=1.0.0",
+    "tiktoken>=0.7.0",
 ]
 
 [dependency-groups]

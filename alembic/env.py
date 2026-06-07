@@ -11,10 +11,13 @@ from __future__ import annotations
 from logging.config import fileConfig
 
 from alembic import context
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy.dialects.postgresql.base import ischema_names
 
 from app.config import get_settings
 from app.persistence.models import Base  # noqa: F401 — ensure models are imported
+import app.persistence.vector_store.models  # noqa: F401 — register S8 tables
 
 config = context.config
 
@@ -22,6 +25,9 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 config.set_main_option("sqlalchemy.url", get_settings().DATABASE_URL)
+
+# Teach reflection about the ``vector`` column type for autogenerate/check.
+ischema_names["vector"] = Vector
 
 target_metadata = Base.metadata
 

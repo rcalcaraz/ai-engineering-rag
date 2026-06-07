@@ -1,88 +1,102 @@
 # ai-engineering-rag
 
-Base de ingestión y parsing para un sistema RAG (Retrieval-Augmented Generation). Extraída del módulo Session 6 del proyecto `ai-engineering/estimator`.
+Servicio FastAPI que implementa un pipeline RAG completo en fases: ingestión de
+fuentes heterogéneas, normalización de documentos, chunking, generación de
+embeddings y persistencia vectorial en Postgres + pgvector con búsqueda semántica.
 
-## Qué es
-
-Este servicio implementa la **primera fase de un pipeline RAG**: convertir fuentes de datos heterogéneas en documentos normalizados (`Document`) listos para chunking e indexación.
-
-Incluye tres capas conceptuales:
+## Qué hace
 
 
-| Capa              | Paquete                                            | Responsabilidad                                         |
-| ----------------- | -------------------------------------------------- | ------------------------------------------------------- |
-| Catálogo          | `app/ingestion/catalog/`                           | Auditoría versionada de fuentes (qué ingerir y por qué) |
-| Loaders + Parsers | `app/ingestion/loaders/`, `app/ingestion/parsers/` | Bytes crudos → `list[Document]`                         |
-| Cleaning + PII    | `app/ingestion/cleaning/`, `app/ingestion/pii/`    | Validación tabular y pseudonimización GDPR              |
+| Fase           | Paquete                                            | Responsabilidad                                            |
+| -------------- | -------------------------------------------------- | ---------------------------------------------------------- |
+| Catálogo       | `app/ingestion/catalog/`                           | Auditoría versionada de fuentes (qué ingerir y por qué)    |
+| Ingestión      | `app/ingestion/loaders/`, `app/ingestion/parsers/` | Bytes crudos → `Document` normalizados                     |
+| Limpieza y PII | `app/ingestion/cleaning/`, `app/ingestion/pii/`    | Validación tabular y pseudonimización GDPR                 |
+| Embeddings     | `app/embedding_pipeline/`                          | Chunking + vectores OpenAI + búsqueda semántica            |
+| Persistencia   | `app/persistence/`                                 | Jobs de ingestión, documentos, mappings PII y vector store |
 
 
-La persistencia (`app/persistence/`) guarda el estado de jobs de ingestión y los mappings de pseudonimización en Postgres.
+### Chunkers disponibles
 
-## Pipeline
+Dos estrategias tras la interfaz común `Chunker` (`app/embedding_pipeline/chunking/base.py`):
 
-```
-POST /api/v1/ingestion/runs
-  └→ validar fuente en catálogo (decision == include)
-  └→ crear job en Postgres (pending)
-  └→ BackgroundTask: ingest_source()
-       └→ FileSystemLoader → ParserRegistry → list[Document]
-       └→ guardar documentos en Postgres (`ingestion_documents`)
-       └→ actualizar job (completed / failed)
-```
 
-Los documentos parseados se persisten por job y se consultan con
-`GET /api/v1/ingestion/jobs/{job_id}/documents`. Chunking, embeddings e índice
-vectorial son el módulo 3.
+| Estrategia   | Módulo                              | Comportamiento                                                                        |
+| ------------ | ----------------------------------- | ------------------------------------------------------------------------------------- |
+| `structural` | `chunking/structural.py`            | Un componente del presupuesto = un chunk, con cabecera de contexto del proyecto padre |
+| `fixed_size` | `chunking/strategies/fixed_size.py` | Ventana fija de tokens con solapamiento; baseline para comparar                       |
 
-## Estructura del proyecto
 
-```
-app/
-├── main.py              # FastAPI + structlog + /health
-├── config.py            # Settings (env vars)
-├── dependencies.py      # Factories de catálogo, loader, registry
-├── routers/ingestion.py # POST /runs, GET /jobs/{id}, GET /jobs/{id}/documents
-├── schemas/ingestion.py # Contratos Pydantic HTTP
-├── ingestion/           # Catálogo, loaders, parsers, cleaning, PII
-└── persistence/         # SQLAlchemy + repos de jobs/mappings
-scripts/                 # Demos de cleaning y PII (Session 6, sin HTTP)
-data/
-├── catalog/catalog.yaml # Catálogo versionado de fuentes
-└── seed/                # Datos de prueba (budgets JSON, transcripts TXT)
-alembic/                 # Migraciones Postgres
-tests/                   # Tests unitarios e HTTP
-```
+El endpoint `POST /embeddings/ingest` usa `structural` por defecto.
 
 ## Requisitos
 
 - Docker Compose v2.20+
-- [uv](https://docs.astral.sh/uv/) (opcional, para desarrollo local sin Docker)
+- [uv](https://docs.astral.sh/uv/) (opcional, para ejecutar fuera del contenedor)
+- API key de OpenAI (necesaria para embeddings)
 
-## Arranque rápido
+## Configuración inicial
 
 ```bash
 cp .env.example .env
+```
+
+Edita `.env` y configura al menos:
+
+```bash
+OPENAI_API_KEY=sk-...          # obligatoria para embeddings
+EMBEDDING_MODEL=text-embedding-3-small
+```
+
+El resto de variables tiene valores por defecto válidos para desarrollo local.
+
+## Arranque
+
+```bash
 docker compose up --build
 ```
 
-Verificar health:
+El servicio queda disponible en `http://localhost:8000`. Swagger UI en `/docs`.
+
+Si cambias dependencias en `pyproject.toml`, reconstruye la imagen:
+
+```bash
+docker compose build rag
+```
+
+## Guía paso a paso
+
+Sigue estos pasos en orden para verificar que todo funciona.
+
+### 1. Comprobar que el servicio está vivo
 
 ```bash
 curl http://localhost:8000/health
 ```
 
-Lanzar una ingestión de presupuestos JSON:
+Respuesta esperada: `{"status":"healthy",...}`.
+
+### 2. Ingerir presupuestos JSON
+
+Lanza una ingestión async de la fuente `presupuestos_json` definida en el catálogo:
 
 ```bash
-# Crear run (202 Accepted)
 curl -X POST http://localhost:8000/api/v1/ingestion/runs \
   -H 'Content-Type: application/json' \
   -d '{"source_name": "presupuestos_json"}'
+```
 
-# Consultar estado (sustituir JOB_ID)
+Guarda el `job_id` de la respuesta (status `202`).
+
+Consulta el estado hasta que pase a `completed`:
+
+```bash
 curl http://localhost:8000/api/v1/ingestion/jobs/JOB_ID
+```
 
-# Ver documentos normalizados (solo si status=completed)
+Recupera los documentos normalizados:
+
+```bash
 curl http://localhost:8000/api/v1/ingestion/jobs/JOB_ID/documents
 ```
 
@@ -94,98 +108,104 @@ http :8000/api/v1/ingestion/jobs/JOB_ID
 http :8000/api/v1/ingestion/jobs/JOB_ID/documents
 ```
 
-Swagger UI disponible en `http://localhost:8000/docs`.
+### 3. Persistir presupuestos como vectores
 
-## API HTTP
-
-
-| Método | Ruta                              | Descripción                                             |
-| ------ | --------------------------------- | ------------------------------------------------------- |
-| `GET`  | `/health`                         | Healthcheck del servicio                                |
-| `POST` | `/api/v1/ingestion/runs`          | Lanza ingestión async de una fuente `include` → **202** |
-| `GET`  | `/api/v1/ingestion/jobs/{job_id}` | Consulta estado del job                                 |
-| `GET`  | `/api/v1/ingestion/jobs/{job_id}/documents` | Lista `Document` persistidos (job `completed`) → **200**; si no terminó → **409** |
-
-
-Errores del endpoint de runs:
-
-- Fuente desconocida → **404** `{reason: "unknown_source"}`
-- Fuente `review`/`exclude` → **400** `{reason: "source_not_included", decision, decision_reason}`
-
-## Configuración
-
-
-| Variable                 | Default                                           | Descripción                                      |
-| ------------------------ | ------------------------------------------------- | ------------------------------------------------ |
-| `APP_ENV`                | `development`                                     | Entorno (`development`, `staging`, `production`) |
-| `LOG_LEVEL`              | `DEBUG`                                           | Nivel de log                                     |
-| `DATABASE_URL`           | `postgresql+psycopg://rag:rag@localhost:5434/rag` | Conexión Postgres                                |
-| `CATALOG_PATH`           | `data/catalog/catalog.yaml`                       | Ruta al catálogo YAML                            |
-| `INGESTION_DATA_ROOT`    | `data/seed`                                       | Raíz de datos para `location` del catálogo       |
-| `PRESIDIO_SPACY_MODEL`   | `es_core_news_md`                                 | Modelo spaCy para Presidio                       |
-| `PSEUDONYM_FAKER_LOCALE` | `es_ES`                                           | Locale Faker para pseudónimos                    |
-| `PSEUDONYM_HASH_SALT`    | `change-me-in-prod`                               | Salt HMAC para mappings PII                      |
-
-
-Dentro de Docker Compose, `DATABASE_URL` se sobreescribe a `rag-postgres:5432`.
-
-## Scripts de demo (Session 6)
-
-Los módulos `cleaning` y `pii` **aún no están cableados** al orchestrator HTTP
-(ver [Próximos pasos](#próximos-pasos-módulo-3)). Estos scripts permiten
-probarlos de forma aislada sobre el corpus de seed, igual que en la sesión en
-vivo.
-
-### `scripts/demo_cleaning_s06.py`
-
-Carga todos los JSON de `data/seed/budgets/`, aplica limpieza tabular
-(`clean_budget_records`) y validación con Pandera (`validate_with_policy`), e
-imprime el informe de partición (válidas / cuarentena / descartadas).
-
-Resultado esperado:
-
-- 6 ficheros entran; el dedup colapsa `BUDGET-2024-0005` → 5 filas.
-- La fila con `total_amount: -50000` se descarta; el resto pasa o va a cuarentena.
+Ingesta un presupuesto histórico (un documento por request). Los chunks y sus
+embeddings se persisten en Postgres + pgvector en una sola transacción:
 
 ```bash
-# En el host (requiere uv sync previo)
-uv run python scripts/demo_cleaning_s06.py
+curl -s -X POST http://localhost:8000/embeddings/ingest \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "source_path": "data/budgets_sample.json::BUD-2024-001",
+    "document_type": "historical_budget",
+    "content": '"$(python3 -c "import json; print(json.dumps(json.load(open(\"data/budgets_sample.json\"))[0]))")"'
+  }' | python3 -m json.tool
+```
 
-# Dentro del contenedor (con docker compose up)
+Respuesta esperada (200 OK):
+
+```json
+{
+  "document_id": 1,
+  "chunks_created": 4,
+  "embedding_dimension": 1536,
+  "ingestion_time_ms": 1240
+}
+```
+
+Si el `source_path` ya existe → **409** `{"detail": "Document already ingested", "document_id": N}`.
+
+### 4. Búsqueda semántica
+
+```bash
+curl -s -X POST http://localhost:8000/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "REST API with OAuth authentication for fintech sector", "k": 5}' \
+  | python3 -m json.tool
+```
+
+### 5. Script de queries de ejemplo
+
+Ingesta el corpus completo (idempotente) y lanza cinco queries representativas:
+
+```bash
+docker compose run --rm rag python scripts/query_examples.py
+```
+
+La salida real contra el corpus de ejemplo está en `[output_examples.txt](output_examples.txt)`.
+
+### 6. Sanity check de embeddings (script aislado)
+
+El script `scripts/compare.py` embebe dos textos y calcula similitud coseno
+(con la biblioteca estándar, sin numpy ni scikit-learn):
+
+```bash
+# Dentro del contenedor
+docker compose exec rag python scripts/compare.py \
+  --text-a "OAuth 2.0 authentication backend for fintech" \
+  --text-b "JWT-based authorization service for banking app"
+
+# Fuera del contenedor (requiere uv sync)
+uv run python scripts/compare.py \
+  --text-a "OAuth 2.0 authentication backend for fintech" \
+  --text-b "JWT-based authorization service for banking app"
+```
+
+Salida esperada:
+
+```
+Text A: OAuth 2.0 authentication backend for fintech
+Text B: JWT-based authorization service for banking app
+Cosine similarity: 0.8421
+```
+
+Resultados de las tres parejas de validación documentados en
+`app/embedding_pipeline/SANITY_CHECK.md`.
+
+### 7. Probar limpieza tabular (script aislado)
+
+El módulo de cleaning aún no está cableado al endpoint HTTP; se prueba con:
+
+```bash
 docker compose exec rag python scripts/demo_cleaning_s06.py
+# o: uv run python scripts/demo_cleaning_s06.py
 ```
 
-### `scripts/demo_pii_s06.py`
+Resultado esperado: 6 ficheros entran, el dedup colapsa `BUDGET-2024-0005` → 5
+filas; la fila con `total_amount: -50000` se descarta.
 
-Pseudonimiza la transcripción `transcripcion_2025-02-03_betanorte.txt` con
-Presidio + spaCy en español (`es_core_news_md`) y los recognizers custom
-(`BUDGET_ID`, `CLIENT_CODE`). Usa `InMemoryMappingStore` (sin Postgres) para
-mostrar consistencia: mismo valor original → mismo pseudónimo.
-
-Requiere el modelo spaCy español (instalado en la imagen Docker o vía
-`python -m spacy download es_core_news_md` en local).
+### 8. Probar pseudonimización PII (script aislado)
 
 ```bash
-uv run python scripts/demo_pii_s06.py
-
 docker compose exec rag python scripts/demo_pii_s06.py
+# o: uv run python scripts/demo_pii_s06.py
 ```
 
-Si `PSEUDONYM_HASH_SALT` no está definido, el script usa un salt de demo
-(`demo-salt`). En producción, configúralo en `.env`.
+Pseudonimiza la transcripción de seed con Presidio + spaCy en español. Requiere
+el modelo `es_core_news_md` (instalado en la imagen Docker).
 
-## Desarrollo local (sin Docker)
-
-```bash
-uv sync
-cp .env.example .env
-
-# Postgres debe estar accesible en localhost:5434
-uv run alembic upgrade head
-uv run uvicorn app.main:app --reload
-```
-
-## Tests
+### 9. Ejecutar tests
 
 ```bash
 # En el host
@@ -195,12 +215,107 @@ uv run pytest -v
 docker compose exec rag bash -c 'pip install pytest pytest-asyncio httpx -q && pytest tests/ -v'
 ```
 
-## Próximos pasos (módulo 3)
+## API HTTP
 
-- Chunking de `Document.text`
-- Embeddings de chunks
-- Activar extensión `pgvector` e índice vectorial
-- Persistencia de chunks (documentos ya por job en `ingestion_documents`)
-- Endpoint de retrieval / búsqueda semántica
-- Cablear cleaning y PII al orchestrator HTTP
 
+| Método | Ruta                                        | Descripción                                                                                          |
+| ------ | ------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `GET`  | `/health`                                   | Healthcheck del servicio                                                                             |
+| `POST` | `/api/v1/ingestion/runs`                    | Lanza ingestión async → **202**                                                                      |
+| `GET`  | `/api/v1/ingestion/jobs/{job_id}`           | Consulta estado del job                                                                              |
+| `GET`  | `/api/v1/ingestion/jobs/{job_id}/documents` | Documentos persistidos (job `completed`) → **200**; si no terminó → **409**                          |
+| `POST` | `/embeddings/ingest`                        | Persiste un presupuesto como document + chunks → **200**; duplicado → **409**; sin API key → **500** |
+| `POST` | `/search`                                   | Búsqueda semántica k-NN por distancia coseno → **200**; sin API key → **500**                        |
+
+
+Errores del endpoint de ingestión:
+
+- Fuente desconocida → **404** `{reason: "unknown_source"}`
+- Fuente `review`/`exclude` → **400** `{reason: "source_not_included", decision, decision_reason}`
+
+## Estructura del proyecto
+
+```
+app/
+├── main.py                          # FastAPI + structlog + /health
+├── config.py                        # Settings (env vars)
+├── dependencies.py                  # Factories de catálogo, chunkers, embedder
+├── routers/ingestion.py             # Endpoints de ingestión
+├── schemas/ingestion.py             # Contratos Pydantic HTTP
+├── embedding_pipeline/
+│   ├── chunking/
+│   │   ├── base.py                  # Interfaz Chunker + count_tokens
+│   │   ├── structural.py            # JSONStructuralChunker
+│   │   └── strategies/
+│   │       └── fixed_size.py        # FixedSizeChunker
+│   ├── embedder.py                  # OpenAIEmbedder (text-embedding-3-small)
+│   ├── schemas.py                   # Budget, Chunk, Ingest/Search contracts
+│   ├── ingest_service.py            # Orquestación chunk → embed → persist
+│   ├── retriever.py                 # Búsqueda semántica k-NN
+│   ├── router.py                    # POST /embeddings/ingest
+│   └── SANITY_CHECK.md
+├── persistence/
+│   ├── vector_store/                # Modelos ORM + repositorio async (pgvector)
+│   └── ...
+├── routers/search.py                # POST /search
+├── ingestion/                       # Catálogo, loaders, parsers, cleaning, PII
+scripts/
+├── compare.py                       # Similitud coseno entre dos textos (S07)
+├── query_examples.py                # Ingesta corpus + 5 queries semánticas (S08)
+├── demo_cleaning_s06.py
+└── demo_pii_s06.py
+data/
+├── catalog/catalog.yaml
+├── budgets_sample.json              # Presupuestos para /embeddings/ingest
+└── seed/                            # Datos de prueba (budgets, transcripts)
+alembic/                             # Migraciones Postgres
+tests/
+```
+
+## Variables de entorno
+
+
+| Variable                 | Default                                           | Descripción                                        |
+| ------------------------ | ------------------------------------------------- | -------------------------------------------------- |
+| `APP_ENV`                | `development`                                     | Entorno (`development`, `staging`, `production`)   |
+| `LOG_LEVEL`              | `DEBUG`                                           | Nivel de log                                       |
+| `OPENAI_API_KEY`         | —                                                 | Requerida para `/embeddings/ingest` y `compare.py` |
+| `EMBEDDING_MODEL`        | `text-embedding-3-small`                          | Modelo de embeddings OpenAI                        |
+| `DATABASE_URL`           | `postgresql+psycopg://rag:rag@localhost:5434/rag` | Conexión Postgres                                  |
+| `CATALOG_PATH`           | `data/catalog/catalog.yaml`                       | Ruta al catálogo YAML                              |
+| `INGESTION_DATA_ROOT`    | `data/seed`                                       | Raíz de datos para `location` del catálogo         |
+| `PRESIDIO_SPACY_MODEL`   | `es_core_news_md`                                 | Modelo spaCy para Presidio                         |
+| `PSEUDONYM_FAKER_LOCALE` | `es_ES`                                           | Locale Faker para pseudónimos                      |
+| `PSEUDONYM_HASH_SALT`    | `change-me-in-prod`                               | Salt HMAC para mappings PII                        |
+
+
+Dentro de Docker Compose, `DATABASE_URL` se sobreescribe a `rag-postgres:5432`.
+
+## Desarrollo local (sin Docker)
+
+```bash
+uv sync
+cp .env.example .env
+# Edita .env con OPENAI_API_KEY
+
+# Postgres debe estar accesible en localhost:5434
+uv run alembic upgrade head
+uv run uvicorn app.main:app --reload
+```
+
+## Sesión 8 — Persistencia vectorial y búsqueda semántica
+
+El pipeline deja de devolver vectores por HTTP y los persiste en Postgres +
+pgvector (`pgvector/pgvector:pg16`, servicio `rag-postgres` en compose). Schema
+gestionado con Alembic (`alembic/versions/0003_session8_pgvector.py`: extensión
+`vector` + tablas `documents` y `chunks`). El stack async (`asyncpg`) convive
+con el sync de la S06: una sola `DATABASE_URL`, el engine async deriva el driver.
+
+### Decisiones de schema
+
+- **Dos tablas y no una.** Un presupuesto produce N chunks: es un uno-a-muchos real. Una tabla única duplicaría la metadata del documento en cada fila y perdería integridad referencial. Con `ON DELETE CASCADE`, borrar un presupuesto elimina sus chunks automáticamente; `documents` posee la procedencia (`source_path`, `ingested_at`), `chunks` posee los vectores.
+- `**metadata` como JSONB y no columnas tipadas.** Lo estable (tipo de documento, tipo de chunk, fechas) va en columnas tipadas; lo que el chunker puede enriquecer (sector, tecnologías, horas) va a JSONB. El índice GIN permite consultar por claves arbitrarias sin una migración por cada clave nueva.
+- `**cosine_distance` y no L2 ni inner product.** Los embeddings de OpenAI vienen normalizados, así que el ranking sería equivalente; usamos coseno por convención RAG y para quedar alineados con la operator class `vector_cosine_ops` del índice HNSW que se añade en el directo. Si la query usa un operador y el índice está construido con otra operator class, Postgres ignora el índice en silencio y cae a sequential scan.
+- **Sin índice vectorial todavía (deliberado).** Con el corpus de ejemplo el sequential scan responde en pocos cientos de ms y es el baseline contra el que el directo mide el impacto del HNSW.
+
+**Fuera de scope (se construye en el directo):** índices vectoriales (HNSW/IVFFlat), filtros por metadata en SQL, búsqueda híbrida (full-text + vector) y tuning de Postgres.

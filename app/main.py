@@ -4,7 +4,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.config import get_settings
+from app.embedding_pipeline.router import router as embeddings_router
 from app.routers import ingestion
+from app.routers import search
 
 
 def configure_logging() -> None:
@@ -65,6 +67,8 @@ app = FastAPI(
 )
 
 app.include_router(ingestion.router)
+app.include_router(embeddings_router)
+app.include_router(search.router)
 
 
 @app.get("/health")

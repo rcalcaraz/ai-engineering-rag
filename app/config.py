@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     APP_ENV: Literal["development", "staging", "production"] = "development"
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "DEBUG"
 
+    OPENAI_API_KEY: str | None = None
+    EMBEDDING_MODEL: str = "text-embedding-3-small"
+
     DATABASE_URL: str = "postgresql+psycopg://rag:rag@localhost:5434/rag"
     CATALOG_PATH: Path = Path("data/catalog/catalog.yaml")
     INGESTION_DATA_ROOT: Path = Path("data/seed")
